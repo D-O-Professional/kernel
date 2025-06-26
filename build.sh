@@ -1,83 +1,94 @@
 #!/usr/bin/env bash
-# setup-uek7-build.sh — Provision Oracle Linux 9 on Termux, fetch UEK7, build & install
+# setup-uek7-build.sh — Shallow-clone & build UEK7-U3 on Oracle Linux 9
 # Usage: ./setup-uek7-build.sh [<fork-owner>]
 # Example: ./setup-uek7-build.sh D-O-Professional
 
 set -euo pipefail
 IFS=$'\n\t'
 
-# — Configuration —
-FORK_OWNER="${1:-D-O-Professional}"
-UEK_BRANCH="uekr7"
-REPO_NAME="kernel"
-REPO_URL="https://github.com/${FORK_OWNER}/${REPO_NAME}.git"
-UPSTREAM_URL="https://github.com/oracle/linux-uek.git"
-WORKDIR="$HOME/${REPO_NAME}"
+# — CONFIGURATION —
+FORK="${1:-D-O-Professional}"
+REPO="kernel"
+UEK_BRANCH="uek7/u3"
+UPSTREAM="https://github.com/oracle/linux-uek.git"
+ORIGIN="https://github.com/${FORK}/${REPO}.git"
+WORKDIR="$HOME/${REPO}"
 
-# — Step 0: prerequisites —
-echo "1️⃣  Installing build dependencies…"
+# — 1. System Prep —
+echo "🔧 Installing EPEL, updating & core build tools…"
+sudo dnf install -y epel-release
 sudo dnf update -y
 sudo dnf install -y \
-  gcc-toolset-11 make bc elfutils-libelf-devel \
-  ncurses-devel dracut grub2-tools git \
-  kernel-uek-devel sudo
+  git make gcc-gnat flex bison xz bzip2 \
+  gcc g++ ncurses-devel wget zlib-devel \
+  patch innoextract unzip python-unversioned-command sudo
 
-# enable GCC 11
-echo "   → Enabling gcc-toolset-11"
-source /opt/rh/gcc-toolset-11/enable
+# — 2. Ensure GCC 11 —
+GCC_MAJOR=$(gcc -dumpversion | cut -f1 -d.)
+if (( GCC_MAJOR < 11 )); then
+  echo "⚙️  Detected GCC $GCC_MAJOR, installing GCC 11…"
+  if sudo dnf list -q gcc-toolset-11 &>/dev/null; then
+    sudo dnf install -y gcc-toolset-11
+    echo "   → Enabling gcc-toolset-11"
+    source /opt/rh/gcc-toolset-11/enable
+  else
+    sudo dnf install -y gcc11 gcc11-c++
+    export CC=gcc11 CXX=g++11
+  fi
+fi
+echo "✅ Using $(gcc --version | head -n1)"
 
-# — Step 1: clone your fork —
-echo "2️⃣  Cloning your shallow fork (${UEK_BRANCH})…"
-if [[ -d "$WORKDIR" ]]; then
-  echo "   ⚠️  Directory $WORKDIR exists, skipping clone."
+# — 3. Clone your fork shallow with UEK7-U3 —
+echo "📥 Cloning ${REPO}@${UEK_BRANCH} from your fork…"
+if [[ ! -d "$WORKDIR" ]]; then
+  git clone --depth 1 \
+    --branch "$UEK_BRANCH" \
+    "$ORIGIN" \
+    "$WORKDIR"
 else
-  git clone \
-    --depth 1 \
-    --branch "${UEK_BRANCH}" \
-    "${REPO_URL}" \
-    "${WORKDIR}"
+  echo "   → $WORKDIR exists, skipping clone"
 fi
 cd "$WORKDIR"
 
-# — Step 2: add & fetch upstream UEK7 —
-echo "3️⃣  Adding upstream and fetching UEK7 tip…"
+# — 4. Add Oracle upstream & fetch UEK7-U3 tip —
+echo "🔗 Adding upstream and fetching UEK7-U3…"
 if ! git remote | grep -q upstream; then
-  git remote add upstream "${UPSTREAM_URL}"
+  git remote add upstream "$UPSTREAM"
 fi
-git fetch --depth 1 upstream "${UEK_BRANCH}"
+# bump buffers to avoid network hiccups
+git -c http.postBuffer=524288000 \
+    fetch --depth 1 upstream "$UEK_BRANCH"
 
-# — Step 3: checkout UEK7 tracking branch —
-echo "4️⃣  Checking out local branch ${UEK_BRANCH}…"
-git checkout -B "${UEK_BRANCH}" upstream/"${UEK_BRANCH}"
+# — 5. Checkout local tracking branch —
+echo "🌿 Checking out local branch uek7-u3…"
+git checkout -B uek7-u3 upstream/"$UEK_BRANCH"
 
-# — Step 4: import current running config —
-echo "5️⃣  Importing existing kernel config…"
-if [[ -e /proc/config.gz ]]; then
+# — 6. Import existing config —
+echo "⚙️  Importing current kernel config…"
+if [[ -f /proc/config.gz ]]; then
   zcat /proc/config.gz > .config
-elif [[ -e /boot/config-$(uname -r) ]]; then
+elif [[ -f /boot/config-$(uname -r) ]]; then
   cp /boot/config-$(uname -r) .config
 else
-  echo "   ⚠️  No existing config found, generating default."
+  echo "   → No existing config found, running defconfig"
   make defconfig
 fi
 
-# — Step 5: interactive config (optional) —
-echo "6️⃣  Launching menuconfig (modify drivers as needed)…"
+# — 7. Interactive config —
+echo "🛠️  Launching menuconfig—tweak drivers now…"
 make menuconfig
 
-# — Step 6: compile & install —
-echo "7️⃣  Building UEK7 + your patches…"
+# — 8. Build & install —
+echo "🚧 Building kernel + your patches…"
 make -j"$(nproc)"
 
-echo "8️⃣  Installing modules & kernel…"
+echo "📦 Installing modules & kernel…"
 sudo make modules_install install
 
-echo "9️⃣  Rebuilding initramfs…"
+echo "🔄 Rebuilding initramfs…"
 sudo dracut --force
 
-echo "🔟  Updating GRUB configuration…"
+echo "✅ Updating GRUB…"
 sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 
-echo ""
-echo "🎉 Build & install complete!"
-echo "Reboot into your new UEK7 kernel to test your driver changes."
+echo -e "\n🎉 Done! Reboot into ‘uek7-u3’ to test your changes."
