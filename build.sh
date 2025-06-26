@@ -42,7 +42,6 @@ echo "✅ Using $(gcc --version | head -n1)"
 echo "📥 Cloning ${REPO}@${UEK_BRANCH} from your fork…"
 if [[ ! -d "$WORKDIR" ]]; then
   git clone --depth 1 \
-    --branch "$UEK_BRANCH" \
     "$ORIGIN" \
     "$WORKDIR"
 else
