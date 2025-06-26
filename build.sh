@@ -1,93 +1,85 @@
 #!/usr/bin/env bash
-# setup-uek7-build.sh — Shallow-clone & build UEK7-U3 on Oracle Linux 9
-# Usage: ./setup-uek7-build.sh [<fork-owner>]
-# Example: ./setup-uek7-build.sh D-O-Professional
+#
+# fetch-uek.sh — Fetch or update UEK7-U3 kernel source
+#
+# Usage: ./fetch-uek.sh [-f <fork-owner>] [-b <branch>] [-d <directory>]
+#   -f  Your GitHub user/org for pushing back (default: D-O-Professional)
+#   -b  UEK branch to grab    (default: uek7/u3)
+#   -d  Target directory      (default: $HOME/kernel)
+#
 
 set -euo pipefail
 IFS=$'\n\t'
 
-# — CONFIGURATION —
-FORK="${1:-D-O-Professional}"
-REPO="kernel"
-UEK_BRANCH="uek7/u3"
+# ─── Defaults ────────────────────────────────────────────────────────────────
+FORK="D-O-Professional"
+BRANCH="uek7/u3"
+TARGET_DIR="$HOME/kernel"
 UPSTREAM="https://github.com/oracle/linux-uek.git"
-ORIGIN="https://github.com/${FORK}/${REPO}.git"
-WORKDIR="$HOME/${REPO}"
+ORIGIN="https://github.com/${FORK}/kernel.git"
 
-# — 1. System Prep —
-echo "🔧 Installing EPEL, updating & core build tools…"
-sudo dnf install -y epel-release
-sudo dnf update -y
-sudo dnf install -y \
-  git make gcc-gnat flex bison xz bzip2 \
-  gcc g++ ncurses-devel wget zlib-devel \
-  patch innoextract unzip python-unversioned-command sudo
+# ─── Parse flags ─────────────────────────────────────────────────────────────
+while getopts "f:b:d:" opt; do
+  case $opt in
+    f) FORK=$OPTARG  ; ORIGIN="https://github.com/${FORK}/kernel.git" ;;
+    b) BRANCH=$OPTARG ;;
+    d) TARGET_DIR=$OPTARG ;;
+    *) echo "Usage: $0 [-f <fork-owner>] [-b <branch>] [-d <directory>]" >&2
+       exit 1 ;;
+  esac
+done
 
-# — 2. Ensure GCC 11 —
-GCC_MAJOR=$(gcc -dumpversion | cut -f1 -d.)
-if (( GCC_MAJOR < 11 )); then
-  echo "⚙️  Detected GCC $GCC_MAJOR, installing GCC 11…"
-  if sudo dnf list -q gcc-toolset-11 &>/dev/null; then
-    sudo dnf install -y gcc-toolset-11
-    echo "   → Enabling gcc-toolset-11"
-    source /opt/rh/gcc-toolset-11/enable
-  else
-    sudo dnf install -y gcc11 gcc11-c++
-    export CC=gcc11 CXX=g++11
+# ─── Prerequisites ───────────────────────────────────────────────────────────
+for tool in git; do
+  if ! command -v $tool &>/dev/null; then
+    echo "Error: '$tool' is required but not found. Aborting."
+    exit 1
   fi
-fi
-echo "✅ Using $(gcc --version | head -n1)"
+done
 
-# — 3. Clone your fork shallow with UEK7-U3 —
-echo "📥 Cloning ${REPO}@${UEK_BRANCH} from your fork…"
-if [[ ! -d "$WORKDIR" ]]; then
-  git clone --depth 1 \
-    "$ORIGIN" \
-    "$WORKDIR"
-else
-  echo "   → $WORKDIR exists, skipping clone"
-fi
-cd "$WORKDIR"
+# ─── Update existing clone? ──────────────────────────────────────────────────
+if [[ -d "$TARGET_DIR/.git" ]]; then
+  echo "→ Found existing repo in $TARGET_DIR. Updating…"
+  cd "$TARGET_DIR"
 
-# — 4. Add Oracle upstream & fetch UEK7-U3 tip —
-echo "🔗 Adding upstream and fetching UEK7-U3…"
-if ! git remote | grep -q upstream; then
-  git remote add upstream "$UPSTREAM"
-fi
-# bump buffers to avoid network hiccups
-git -c http.postBuffer=524288000 \
-    fetch --depth 1 upstream "$UEK_BRANCH"
+  # Ensure remotes are correct
+  git remote set-url upstream "$UPSTREAM" || git remote add upstream "$UPSTREAM"
+  git remote set-url origin   "$ORIGIN"   || git remote add origin   "$ORIGIN"
 
-# — 5. Checkout local tracking branch —
-echo "🌿 Checking out local branch uek7-u3…"
-git checkout -B uek7-u3 upstream/"$UEK_BRANCH"
-
-# — 6. Import existing config —
-echo "⚙️  Importing current kernel config…"
-if [[ -f /proc/config.gz ]]; then
-  zcat /proc/config.gz > .config
-elif [[ -f /boot/config-$(uname -r) ]]; then
-  cp /boot/config-$(uname -r) .config
-else
-  echo "   → No existing config found, running defconfig"
-  make defconfig
+  # Fetch & fast-forward
+  git fetch --depth=1 upstream "$BRANCH"
+  git checkout -B "${BRANCH##*/}" "upstream/${BRANCH}"
+  echo "✔ Updated to $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
+  exit 0
 fi
 
-# — 7. Interactive config —
-echo "🛠️  Launching menuconfig—tweak drivers now…"
-make menuconfig
+# ─── Fresh clone from Oracle upstream ────────────────────────────────────────
+echo "→ Cloning UEK branch '${BRANCH}' from Oracle into '$TARGET_DIR'…"
+git clone \
+  --depth 1 \
+  --branch "$BRANCH" \
+  "$UPSTREAM" \
+  "$TARGET_DIR"
 
-# — 8. Build & install —
-echo "🚧 Building kernel + your patches…"
-make -j"$(nproc)"
+cd "$TARGET_DIR"
 
-echo "📦 Installing modules & kernel…"
-sudo make modules_install install
+# ─── Wire in your fork as 'origin' ───────────────────────────────────────────
+echo "→ Adding your fork as 'origin': $ORIGIN"
+git remote rename origin upstream
+git remote add origin "$ORIGIN"
+echo "→ Pushing local ${BRANCH##*/} branch to origin"
+git push -u origin HEAD
 
-echo "🔄 Rebuilding initramfs…"
-sudo dracut --force
-
-echo "✅ Updating GRUB…"
-sudo grub2-mkconfig -o /boot/grub2/grub.cfg
-
-echo -e "\n🎉 Done! Reboot into ‘uek7-u3’ to test your changes."
+# ─── Summary ────────────────────────────────────────────────────────────────
+echo
+echo "✔ Done. Repo is in: $TARGET_DIR"
+echo "   Branch: $(git rev-parse --abbrev-ref HEAD)"
+echo "   Commit: $(git rev-parse --short HEAD)"
+echo
+echo "Next steps:"
+echo "  1) cd $TARGET_DIR"
+echo "  2) modify .config or run 'make menuconfig'"
+echo "  3) make -j\$(nproc)"
+echo "  4) sudo make modules_install install"
+echo "  5) sudo dracut --force && sudo grub2-mkconfig -o /boot/grub2/grub.cfg"
+echo
